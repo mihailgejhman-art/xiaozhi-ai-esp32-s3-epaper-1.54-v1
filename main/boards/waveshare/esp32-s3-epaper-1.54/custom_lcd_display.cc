@@ -8,8 +8,13 @@
 #include "config.h"
 #include "esp_lvgl_port.h"
 #include "settings.h"
+#include "application.h"
+#include <time.h>
+#include <cJSON.h>
 
 #define TAG "CustomLcdDisplay"
+
+LV_FONT_DECLARE(lv_font_montserrat_48);
 
 #define BYTES_PER_PIXEL (LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565))
 #define BUFF_SIZE (EXAMPLE_LCD_WIDTH * EXAMPLE_LCD_HEIGHT * BYTES_PER_PIXEL)
@@ -92,18 +97,18 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
 
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_priority   = 2;
-    port_cfg.timer_period_ms = 50;
+    port_cfg.timer_period_ms = 500;
     lvgl_port_init(&port_cfg);
     lvgl_port_lock(0);
 
-    buffer = (uint8_t *) heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_SPIRAM);
+    buffer = (uint8_t *) heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_INTERNAL);
     assert(buffer);
     display_ = lv_display_create(width, height); /* 以水平和垂直分辨率（像素）进行基本初始化 */
     lv_display_set_flush_cb(display_, lvgl_flush_cb);
     lv_display_set_user_data(display_, this);
 
     uint8_t *buffer_1 = NULL;
-    buffer_1          = (uint8_t *) heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_SPIRAM);
+    buffer_1          = (uint8_t *) heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_INTERNAL);
     assert(buffer_1);
     lv_display_set_buffers(display_, buffer_1, NULL, BUFF_SIZE, LV_DISPLAY_RENDER_MODE_FULL);
 
@@ -164,7 +169,7 @@ void CustomLcdDisplay::spi_port_init() {
 
     spi_device_interface_config_t devcfg = {};
     devcfg.spics_io_num                  = -1;
-    devcfg.clock_speed_hz                = 40 * 1000 * 1000; // Clock out at 10 MHz
+    devcfg.clock_speed_hz                = 40 * 1000 * 1000; // SPI clock at 40 MHz
     devcfg.mode                          = 0;                // SPI mode 0
     devcfg.queue_size                    = 7;                // We want to be able to queue 7 transactions at a time
 
@@ -383,7 +388,7 @@ void CustomLcdDisplay::EPD_Init_Partial() {
 void CustomLcdDisplay::EPD_DisplayPart() {
     EPD_SendCommand(0x24);
     assert(buffer);
-    writeBytes(buffer, 5000);
+    writeBytes(buffer, lcd_spi_data.buffer_len);
     EPD_TurnOnDisplayPart();
 }
 
@@ -393,11 +398,254 @@ void CustomLcdDisplay::EPD_DrawColorPixel(uint16_t x, uint16_t y, uint8_t color)
         return;
     }
 
-    uint16_t index = y * 25 + (x >> 3);
+    uint16_t index = y * (Width >> 3) + (x >> 3);
     uint8_t  bit   = 7 - (x & 0x07);
     if (color == DRIVER_COLOR_WHITE) {
         buffer[index] |= (0x01 << bit);
     } else {
         buffer[index] &= ~(0x01 << bit);
+    }
+}
+
+#ifdef CONFIG_WEATHER_ENABLE
+void CustomLcdDisplay::UpdateWeather() {
+    if (weather_fetching_) return;
+    weather_fetching_ = true;
+    xTaskCreate([](void* p) {
+        auto* self = static_cast<CustomLcdDisplay*>(p);
+        self->fetch_weather();
+        self->weather_fetching_ = false;
+        vTaskDelete(NULL);
+    }, "weather_fetch", 8192, this, 5, NULL);
+}
+
+void CustomLcdDisplay::weather_timer_cb(void* arg) {
+    auto* self = static_cast<CustomLcdDisplay*>(arg);
+    // Delete one-shot init timer after first fire to prevent handle leak
+    if (self->weather_init_timer_ != nullptr) {
+        esp_timer_delete(self->weather_init_timer_);
+        self->weather_init_timer_ = nullptr;
+    }
+    if (self->weather_fetching_) return;
+    self->weather_fetching_ = true;
+    xTaskCreate([](void* p) {
+        auto* task_self = static_cast<CustomLcdDisplay*>(p);
+        task_self->fetch_weather();
+        task_self->weather_fetching_ = false;
+        vTaskDelete(NULL);
+    }, "weather_fetch", 8192, self, 5, NULL);
+}
+
+void CustomLcdDisplay::fetch_weather() {
+    auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) return;
+    auto http = network->CreateHttp(10);
+    if (http == nullptr) return;
+
+    std::string url = "http://wttr.in/" + std::string(CONFIG_WEATHER_CITY) + "?format=%25t%250a%25h%250a%25C";
+
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(10000);
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Weather: HTTP open failed");
+        http->Close();
+        return;
+    }
+
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "Weather: HTTP %d", http->GetStatusCode());
+        http->Close();
+        return;
+    }
+
+    // Use the simple text format — response is under 100 bytes, avoids 8KB buffer deadlock
+    std::string response;
+    char read_buf[128];
+    int n;
+    while ((n = http->Read(read_buf, sizeof(read_buf))) > 0) {
+        response.append(read_buf, n);
+    }
+    http->Close();
+
+    // wttr.in format: "%t\n%h\n%C"
+    std::string text_buf = response;
+    if (!text_buf.empty() && text_buf.back() == '\n') {
+        text_buf.pop_back();
+    }
+
+    // Parse by newline: line 0 = temp, line 1 = humidity, line 2 = condition
+    std::string temp_str, hum_str, cond_str;
+    size_t pos1 = text_buf.find('\n');
+    if (pos1 != std::string::npos) {
+        temp_str = text_buf.substr(0, pos1);
+        size_t pos2 = text_buf.find('\n', pos1 + 1);
+        if (pos2 != std::string::npos) {
+            hum_str = text_buf.substr(pos1 + 1, pos2 - pos1 - 1);
+            cond_str = text_buf.substr(pos2 + 1);
+        } else {
+            hum_str = text_buf.substr(pos1 + 1);
+        }
+    } else {
+        temp_str = text_buf;
+    }
+
+    // Combine temp and humidity on one line
+    std::string line1 = temp_str;
+    if (!hum_str.empty()) {
+        line1 += "  " + hum_str;
+    }
+
+    ESP_LOGI(TAG, "Weather: %s | %s", line1.c_str(), cond_str.c_str());
+
+    {
+        DisplayLockGuard lock(this);
+        weather_text_ = line1;
+        weather_cond_text_ = cond_str;
+        weather_valid_ = true;
+        weather_dirty_ = true;
+    }
+}
+#endif
+
+void CustomLcdDisplay::SetupUI() {
+    LcdDisplay::SetupUI();
+
+    lvgl_port_lock(0);
+
+    // Scale emoji box 2x from its center for larger emoji on e-paper
+    if (emoji_box_ != nullptr) {
+        lv_obj_set_style_transform_pivot_x(emoji_box_, LV_PCT(50), 0);
+        lv_obj_set_style_transform_pivot_y(emoji_box_, LV_PCT(50), 0);
+        lv_obj_set_style_transform_scale(emoji_box_, 512, 0);
+    }
+
+    auto screen = lv_screen_active();
+
+    // Hide emoji box initially — clock is shown during idle instead
+    if (emoji_box_ != nullptr) {
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    clock_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(clock_label_, &lv_font_montserrat_48, 0);
+    lv_label_set_text(clock_label_, "--:--");
+    lv_obj_align(clock_label_, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_transform_pivot_x(clock_label_, LV_PCT(50), 0);
+    lv_obj_set_style_transform_pivot_y(clock_label_, LV_PCT(50), 0);
+    lv_obj_set_style_transform_scale(clock_label_, 346, 0);
+    lv_obj_add_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);
+
+    date_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(date_label_, lv_obj_get_style_text_font(screen, LV_PART_MAIN), LV_PART_MAIN);
+    lv_label_set_text(date_label_, "");
+    lv_obj_align(date_label_, LV_ALIGN_CENTER, 0, 14);
+    lv_obj_add_flag(date_label_, LV_OBJ_FLAG_HIDDEN);
+
+#ifdef CONFIG_WEATHER_ENABLE
+    weather_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(weather_label_, lv_obj_get_style_text_font(screen, LV_PART_MAIN), LV_PART_MAIN);
+    lv_label_set_text(weather_label_, "");
+    lv_obj_align(weather_label_, LV_ALIGN_CENTER, 0, 37);
+    lv_obj_add_flag(weather_label_, LV_OBJ_FLAG_HIDDEN);
+
+    weather_cond_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(weather_cond_label_, lv_obj_get_style_text_font(screen, LV_PART_MAIN), LV_PART_MAIN);
+    lv_label_set_text(weather_cond_label_, "");
+    lv_obj_align(weather_cond_label_, LV_ALIGN_CENTER, 0, 60);
+    lv_obj_add_flag(weather_cond_label_, LV_OBJ_FLAG_HIDDEN);
+
+    esp_timer_create_args_t timer_args = {
+        .callback = weather_timer_cb,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "weather_timer",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&timer_args, &weather_timer_);
+    esp_timer_start_periodic(weather_timer_, CONFIG_WEATHER_UPDATE_INTERVAL * 60 * 1000000ULL);
+
+    esp_timer_create_args_t init_args = {
+        .callback = weather_timer_cb,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "weather_init",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&init_args, &weather_init_timer_);
+    esp_timer_start_once(weather_init_timer_, 15 * 1000000ULL);
+#endif
+
+    lvgl_port_unlock();
+}
+
+void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+
+    if (state == kDeviceStateIdle) {
+        {
+            DisplayLockGuard lock(this);
+            // Hide emoji, show clock
+            if (emoji_box_ != nullptr && !lv_obj_has_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN)) {
+                lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+
+        time_t now = time(NULL);
+        struct tm* tm = localtime(&now);
+        if (tm == NULL) return;
+
+        if (tm->tm_year >= (2024 - 1900)) {
+            char time_str[16];
+            strftime(time_str, sizeof(time_str), "%H:%M", tm);
+            char date_str[32];
+            strftime(date_str, sizeof(date_str), "%a %d %b", tm);
+
+            // Only update labels when content changes to avoid unnecessary ePaper refreshes
+            if (prev_clock_str_ == time_str && prev_date_str_ == date_str
+#ifdef CONFIG_WEATHER_ENABLE
+                && (weather_valid_ && !weather_dirty_)
+#endif
+                ) {
+                return;
+            }
+            prev_clock_str_ = time_str;
+            prev_date_str_ = date_str;
+
+            {
+                DisplayLockGuard lock(this);
+                lv_label_set_text(clock_label_, time_str);
+                lv_label_set_text(date_label_, date_str);
+                lv_obj_remove_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(date_label_, LV_OBJ_FLAG_HIDDEN);
+#ifdef CONFIG_WEATHER_ENABLE
+                if (weather_valid_ && weather_dirty_) {
+                    lv_label_set_text(weather_label_, weather_text_.c_str());
+                    lv_obj_remove_flag(weather_label_, LV_OBJ_FLAG_HIDDEN);
+                    if (!weather_cond_text_.empty()) {
+                        lv_label_set_text(weather_cond_label_, weather_cond_text_.c_str());
+                        lv_obj_remove_flag(weather_cond_label_, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    weather_dirty_ = false;
+                }
+#endif
+            }
+        }
+    } else {
+        {
+            DisplayLockGuard lock(this);
+            // Show emoji, hide clock
+            if (emoji_box_ != nullptr && lv_obj_has_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN)) {
+                lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+            }
+            lv_obj_add_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(date_label_, LV_OBJ_FLAG_HIDDEN);
+#ifdef CONFIG_WEATHER_ENABLE
+            lv_obj_add_flag(weather_label_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(weather_cond_label_, LV_OBJ_FLAG_HIDDEN);
+#endif
+        }
+        LcdDisplay::UpdateStatusBar(update_all);
     }
 }

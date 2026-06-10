@@ -138,6 +138,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             // Set status to clock "HH:MM"
             time_t now = time(NULL);
             struct tm* tm = localtime(&now);
+            if (tm == NULL) return;
             // Check if the we have already set the time
             if (tm->tm_year >= 2025 - 1900) {
                 char time_str[16];

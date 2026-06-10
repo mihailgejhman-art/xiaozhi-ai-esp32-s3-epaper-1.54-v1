@@ -46,9 +46,33 @@ private:
     const int Height;
     spi_device_handle_t spi;
     uint8_t *buffer = NULL;
+    lv_obj_t *clock_label_ = nullptr;
+    lv_obj_t *date_label_ = nullptr;
+    std::string prev_clock_str_;
+    std::string prev_date_str_;
+#ifdef CONFIG_WEATHER_ENABLE
+    lv_obj_t *weather_label_ = nullptr;
+    lv_obj_t *weather_cond_label_ = nullptr;
+    std::string weather_text_;
+    std::string weather_cond_text_;
+    bool weather_valid_ = false;
+    bool weather_dirty_ = false;
+    esp_timer_handle_t weather_timer_ = nullptr;
+    esp_timer_handle_t weather_init_timer_ = nullptr;
+
+    bool weather_fetching_ = false;
+
+    static void weather_timer_cb(void* arg);
+    void fetch_weather();
+#endif
+public:
+    void UpdateWeather() override;
     
     static void lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
     
+    virtual void SetupUI() override;
+    virtual void UpdateStatusBar(bool update_all = false) override;
+
     void spi_gpio_init();
     void spi_port_init();
     void read_busy();

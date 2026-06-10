@@ -16,6 +16,9 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <esp_sntp.h>
+#include <sys/time.h>
+#include <stdlib.h>
 
 #define TAG "Application"
 
@@ -258,8 +261,56 @@ void Application::Run() {
     }
 }
 
+void Application::OnTimeSynced(struct timeval *tv) {
+    auto& app = Application::GetInstance();
+    app.ntp_synced_ = true;
+    ESP_LOGI(TAG, "NTP time synchronized");
+}
+
+void Application::InitializeNtp() {
+    if (esp_sntp_enabled()) {
+        ESP_LOGI(TAG, "NTP already initialized");
+        return;
+    }
+
+    // Set timezone to UTC+5 (Magnitogorsk)
+    {
+        Settings ntp_settings("ntp", false);
+        ntp_settings.EraseKey("timezone");
+        ntp_settings.SetString("timezone", "UTC-5");
+        setenv("TZ", "UTC-5", 1);
+        tzset();
+        ESP_LOGI(TAG, "Timezone set to: UTC+5");
+    }
+
+    ESP_LOGI(TAG, "Initializing NTP");
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    
+    sntp_setservername(0, (char *)"pool.ntp.org");
+    sntp_setservername(1, (char *)"time.google.com");
+    sntp_setservername(2, (char *)"ntp.aliyun.com");
+
+    sntp_set_time_sync_notification_cb(OnTimeSynced);
+    esp_sntp_set_sync_interval(21600000); // 6 hours
+
+    esp_sntp_init();
+
+    ESP_LOGI(TAG, "NTP started, sync interval: 6 hours");
+}
+
+void Application::StopNtp() {
+    if (esp_sntp_enabled()) {
+        esp_sntp_stop();
+        ntp_synced_ = false;
+        ESP_LOGI(TAG, "NTP stopped");
+    }
+}
+
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+
+    InitializeNtp();
+
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -284,6 +335,8 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    StopNtp();
+
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
@@ -872,6 +925,7 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            display->UpdateWeather();      // Refresh weather after returning from dialog
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;

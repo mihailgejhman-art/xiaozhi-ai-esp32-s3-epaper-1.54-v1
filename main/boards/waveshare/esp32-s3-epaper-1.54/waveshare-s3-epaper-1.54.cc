@@ -11,7 +11,11 @@
 #include "board_power_bsp.h"
 #include "custom_lcd_display.h"
 #include "lvgl.h"
+#include "esp_lvgl_port.h"
 #include "mcp_server.h"
+#include "power_save_timer.h"
+
+extern const lv_image_dsc_t emoji_1f634_64;
 
 #define TAG "waveshare_epaper_1_54"
 
@@ -22,6 +26,7 @@ class CustomBoard : public WifiBoard {
     Button                    pwr_button_;
     CustomLcdDisplay         *display_;
     BoardPowerBsp            *power_;
+    PowerSaveTimer           *power_save_timer_;
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t         cali_handle;
 
@@ -50,12 +55,23 @@ class CustomBoard : public WifiBoard {
         });
 
         pwr_button_.OnLongPress([this]() {
-            GetDisplay()->SetChatMessage("system", "OFF");
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            lvgl_port_lock(0);
+            lv_obj_clean(lv_screen_active());
+            lv_obj_t* img = lv_img_create(lv_screen_active());
+            lv_img_set_src(img, &emoji_1f634_64);
+            lv_obj_center(img);
+            lvgl_port_unlock();
+
+            vTaskDelay(pdMS_TO_TICKS(2000));
             power_->PowerAudioOff();
             power_->PowerEpdOff();
             power_->VbatPowerOff();
         });
+    }
+
+    void InitializePowerSaveTimer() {
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
+        power_save_timer_->SetEnabled(true);
     }
 
     void InitializeTools() {
@@ -145,10 +161,15 @@ class CustomBoard : public WifiBoard {
   public:
     CustomBoard() : boot_button_(BOOT_BUTTON_GPIO), pwr_button_(VBAT_PWR_GPIO) {
         Power_Init();
+        InitializePowerSaveTimer();
         InitializeI2c();
         InitializeButtons();
         InitializeTools();
         InitializeLcdDisplay();
+    }
+
+    ~CustomBoard() {
+        delete power_save_timer_;
     }
 
     virtual AudioCodec *GetAudioCodec() override {
@@ -166,6 +187,13 @@ class CustomBoard : public WifiBoard {
         level = (int)BatterygetPercent();
 
         return true;
+    }
+
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        if (level != PowerSaveLevel::LOW_POWER) {
+            power_save_timer_->WakeUp();
+        }
+        WifiBoard::SetPowerSaveLevel(level);
     }
 };
 

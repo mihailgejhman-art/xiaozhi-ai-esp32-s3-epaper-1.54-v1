@@ -275,6 +275,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_M5STACK_ATOM_MATRIX_ECHO_BASE
         bool "M5Stack AtomMatrix + Echo Base"
         depends on IDF_TARGET_ESP32
+    config BOARD_TYPE_M5STACK_CORE_INK
+        bool "M5Stack Core Ink"
+        depends on IDF_TARGET_ESP32
     config BOARD_TYPE_WAVESHARE_ESP32_TOUCH_LCD_3_5
         bool "Waveshare ESP32-Touch-LCD-3.5"
         depends on IDF_TARGET_ESP32
@@ -981,6 +984,32 @@ menu "TAIJIPAI_S3_CONFIG"
     default y
     help
         启动双声道
+endmenu
+
+menu "Weather Display (wttr.in)"
+
+    config WEATHER_ENABLE
+        bool "Enable weather display on clock screen"
+        default n
+        help
+            Enable weather display on the clock screen using wttr.in.
+            Shows temperature, humidity and weather condition (no API key needed).
+
+    config WEATHER_CITY
+        string "City name"
+        default "Moscow"
+        depends on WEATHER_ENABLE
+        help
+            City name for weather data (e.g. "Moscow", "London", "New York").
+
+    config WEATHER_UPDATE_INTERVAL
+        int "Weather update interval (minutes)"
+        default 10
+        range 5 120
+        depends on WEATHER_ENABLE
+        help
+            How often to fetch weather data (in minutes).
+
 endmenu
 
 endmenu
