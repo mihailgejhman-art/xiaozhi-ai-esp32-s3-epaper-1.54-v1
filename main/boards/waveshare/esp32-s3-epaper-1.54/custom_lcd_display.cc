@@ -592,15 +592,14 @@ void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
             }
         }
 
-        time_t now = time(NULL);
-        struct tm* tm = localtime(&now);
-        if (tm == NULL) return;
+        struct tm tm = app.GetCachedTm();
+        if (tm.tm_year < (2024 - 1900)) return;
 
-        if (tm->tm_year >= (2024 - 1900)) {
+        {
             char time_str[16];
-            strftime(time_str, sizeof(time_str), "%H:%M", tm);
+            strftime(time_str, sizeof(time_str), "%H:%M", &tm);
             char date_str[32];
-            strftime(date_str, sizeof(date_str), "%a %d %b", tm);
+            strftime(date_str, sizeof(date_str), "%a %d %b", &tm);
 
             // Only update labels when content changes to avoid unnecessary ePaper refreshes
             if (prev_clock_str_ == time_str && prev_date_str_ == date_str

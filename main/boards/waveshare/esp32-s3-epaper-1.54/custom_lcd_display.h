@@ -1,6 +1,7 @@
 #ifndef __CUSTOM_LCD_DISPLAY_H__
 #define __CUSTOM_LCD_DISPLAY_H__
 
+#include <atomic>
 #include <driver/gpio.h>
 #include "lcd_display.h"
 
@@ -60,7 +61,7 @@ private:
     esp_timer_handle_t weather_timer_ = nullptr;
     esp_timer_handle_t weather_init_timer_ = nullptr;
 
-    bool weather_fetching_ = false;
+    std::atomic<bool> weather_fetching_{false};
 
     static void weather_timer_cb(void* arg);
     void fetch_weather();
