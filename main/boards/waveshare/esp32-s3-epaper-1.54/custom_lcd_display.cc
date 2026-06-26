@@ -19,30 +19,30 @@ LV_FONT_DECLARE(lv_font_montserrat_48);
 #define BYTES_PER_PIXEL (LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565))
 #define BUFF_SIZE (EXAMPLE_LCD_WIDTH * EXAMPLE_LCD_HEIGHT * BYTES_PER_PIXEL)
 
-// LVGL transform_scale values (base 256 = 1.0x)
-static constexpr int EMOJI_SCALE = 512;   // 512/256 = 2.0x
-static constexpr int CLOCK_SCALE = 346;   // 346/256 ≈ 1.35x
+static constexpr int EMOJI_SCALE = 512;
+static constexpr int CLOCK_SCALE = 346;
+static constexpr int MAX_PARTIAL_REFRESHES = 10;
 
 const uint8_t WF_Full_1IN54[159] =
-{											
+{
     0x80,0x48,0x40,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
     0x40,0x48,0x80,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
     0x80,0x48,0x40,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
     0x40,0x48,0x80,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
     0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
-    0xA,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x8,0x1,0x0,0x8,0x1,0x0,0x2,				
-    0xA,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x0,0x0,0x0,0x0,0x0,0x0,0x0,				
-    0x22,0x22,0x22,0x22,0x22,0x22,0x0,0x0,0x0,			
+    0xA,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x8,0x1,0x0,0x8,0x1,0x0,0x2,
+    0xA,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x0,0x0,0x0,0x0,0x0,0x0,0x0,
+    0x22,0x22,0x22,0x22,0x22,0x22,0x0,0x0,0x0,
     0x22,0x17,0x41,0x0,0x32,0x20
 };
 
@@ -69,27 +69,51 @@ const uint8_t WF_PARTIAL_1IN54_0[159] =
     0x02,0x17,0x41,0xB0,0x32,0x28,
 };
 
+// 4x4 Bayer dithering matrix for B&W conversion quality
+static constexpr uint8_t BAYER_4x4[4][4] = {
+    { 0,  8,  2, 10},
+    {12,  4, 14,  6},
+    { 3, 11,  1,  9},
+    {15,  7, 13,  5}
+};
+
+static uint8_t apply_dither(lv_color16_t pixel, int x, int y) {
+    uint16_t gray = (pixel.red * 77 + pixel.green * 150 + pixel.blue * 29) >> 8;
+    int threshold = BAYER_4x4[y & 3][x & 3] * 16;
+    return (gray + threshold >= 128) ? DRIVER_COLOR_WHITE : DRIVER_COLOR_BLACK;
+}
+
 void CustomLcdDisplay::lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *color_p) {
     assert(disp != NULL);
-    CustomLcdDisplay *driver = (CustomLcdDisplay *) lv_display_get_user_data(disp);
-    uint16_t         *buffer = (uint16_t *) color_p;
+    CustomLcdDisplay *driver = static_cast<CustomLcdDisplay *>(lv_display_get_user_data(disp));
+    lv_color16_t     *buffer = reinterpret_cast<lv_color16_t *>(color_p);
     driver->EPD_Clear();
     for (int y = area->y1; y <= area->y2; y++) {
         for (int x = area->x1; x <= area->x2; x++) {
-            uint8_t color = (*buffer < 0x7fff) ? DRIVER_COLOR_BLACK : DRIVER_COLOR_WHITE;
+            uint8_t color = apply_dither(*buffer, x, y);
             driver->EPD_DrawColorPixel(x, y, color);
             buffer++;
         }
     }
-    driver->EPD_DisplayPart();
+    driver->partial_refresh_count_++;
+    if (driver->partial_refresh_count_ >= MAX_PARTIAL_REFRESHES) {
+        driver->EPD_Init();
+        driver->EPD_Clear();
+        driver->EPD_DisplayPartBaseImage();
+        driver->EPD_Init_Partial();
+        driver->partial_refresh_count_ = 0;
+        ESP_LOGI(TAG, "Periodic full refresh completed");
+    } else {
+        driver->EPD_DisplayPart();
+    }
     lv_display_flush_ready(disp);
 }
 
-CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, 
-    int width, int height, int offset_x, int offset_y, 
-    bool mirror_x, bool mirror_y, bool swap_xy, custom_lcd_spi_t _lcd_spi_data) : 
-    LcdDisplay(panel_io, panel, width, height), 
-    lcd_spi_data(_lcd_spi_data), 
+CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+    int width, int height, int offset_x, int offset_y,
+    bool mirror_x, bool mirror_y, bool swap_xy, custom_lcd_spi_t _lcd_spi_data) :
+    LcdDisplay(panel_io, panel, width, height),
+    lcd_spi_data(_lcd_spi_data),
     Width(width), Height(height) {
 
     ESP_LOGI(TAG, "Initialize SPI");
@@ -105,32 +129,32 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     lvgl_port_init(&port_cfg);
     lvgl_port_lock(0);
 
-    buffer = (uint8_t *) heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_INTERNAL);
+    buffer = static_cast<uint8_t *>(heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_INTERNAL));
     assert(buffer);
-    display_ = lv_display_create(width, height); /* 以水平和垂直分辨率（像素）进行基本初始化 */
+    display_ = lv_display_create(width, height);
     lv_display_set_flush_cb(display_, lvgl_flush_cb);
     lv_display_set_user_data(display_, this);
 
-    uint8_t *buffer_1 = NULL;
-    buffer_1          = (uint8_t *) heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_INTERNAL);
+    uint8_t *buffer_1 = nullptr;
+    buffer_1 = static_cast<uint8_t *>(heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_SPIRAM));
+    if (buffer_1 == nullptr) {
+        ESP_LOGW(TAG, "PSRAM allocation failed, trying internal RAM");
+        buffer_1 = static_cast<uint8_t *>(heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_INTERNAL));
+    }
     assert(buffer_1);
-    lv_display_set_buffers(display_, buffer_1, NULL, BUFF_SIZE, LV_DISPLAY_RENDER_MODE_FULL);
+    lv_display_set_buffers(display_, buffer_1, nullptr, BUFF_SIZE, LV_DISPLAY_RENDER_MODE_FULL);
 
     ESP_LOGI(TAG, "EPD init");
     EPD_Init();
     EPD_Clear();
-    EPD_Display();
     EPD_DisplayPartBaseImage();
-    EPD_Init_Partial(); // 局部刷新初始化
+    EPD_Init_Partial();
 
     lvgl_port_unlock();
     if (display_ == nullptr) {
         ESP_LOGE(TAG, "Failed to add display");
         return;
     }
-
-    // Note: SetupUI() should be called by Application::Initialize(), not in constructor
-    // to ensure lvgl objects are created after the display is fully initialized.
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
@@ -184,9 +208,9 @@ void CustomLcdDisplay::spi_port_init() {
 
     spi_device_interface_config_t devcfg = {};
     devcfg.spics_io_num                  = -1;
-    devcfg.clock_speed_hz                = 40 * 1000 * 1000; // SPI clock at 40 MHz
-    devcfg.mode                          = 0;                // SPI mode 0
-    devcfg.queue_size                    = 7;                // We want to be able to queue 7 transactions at a time
+    devcfg.clock_speed_hz                = 20 * 1000 * 1000;
+    devcfg.mode                          = 0;
+    devcfg.queue_size                    = 7;
 
     ret = spi_bus_initialize((spi_host_device_t) spi_host, &buscfg, SPI_DMA_CH_AUTO);
     ESP_ERROR_CHECK(ret);
@@ -196,8 +220,15 @@ void CustomLcdDisplay::spi_port_init() {
 
 void CustomLcdDisplay::read_busy() {
     int busy = lcd_spi_data.busy;
+    int elapsed = 0;
     while (gpio_get_level((gpio_num_t) busy) == 1) {
-        vTaskDelay(pdMS_TO_TICKS(5)); // LOW: idle, HIGH: busy
+        vTaskDelay(pdMS_TO_TICKS(10));
+        elapsed += 10;
+        if (elapsed > BUSY_TIMEOUT_MS) {
+            ESP_LOGE(TAG, "EPD BUSY timeout after %dms, resetting", elapsed);
+            EPD_Init();
+            return;
+        }
     }
 }
 
@@ -207,8 +238,10 @@ void CustomLcdDisplay::SPI_SendByte(uint8_t data) {
     memset(&t, 0, sizeof(t));
     t.length    = 8;
     t.tx_buffer = &data;
-    ret         = spi_device_polling_transmit(spi, &t); // Transmit!
-    assert(ret == ESP_OK);                              // Should have had no issues.
+    ret         = spi_device_polling_transmit(spi, &t);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI transmit failed: %s", esp_err_to_name(ret));
+    }
 }
 
 void CustomLcdDisplay::EPD_SendData(uint8_t data) {
@@ -233,8 +266,10 @@ void CustomLcdDisplay::writeBytes(uint8_t *buffer, int len) {
     memset(&t, 0, sizeof(t));
     t.length    = 8 * len;
     t.tx_buffer = buffer;
-    ret         = spi_device_polling_transmit(spi, &t); // Transmit!
-    assert(ret == ESP_OK);
+    ret         = spi_device_polling_transmit(spi, &t);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI writeBytes failed: %s", esp_err_to_name(ret));
+    }
     set_cs_1();
 }
 
@@ -246,17 +281,19 @@ void CustomLcdDisplay::writeBytes(const uint8_t *buffer, int len) {
     memset(&t, 0, sizeof(t));
     t.length    = 8 * len;
     t.tx_buffer = buffer;
-    ret         = spi_device_polling_transmit(spi, &t); // Transmit!
-    assert(ret == ESP_OK);
+    ret         = spi_device_polling_transmit(spi, &t);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI writeBytes const failed: %s", esp_err_to_name(ret));
+    }
     set_cs_1();
 }
 
 void CustomLcdDisplay::EPD_SetWindows(uint16_t Xstart, uint16_t Ystart, uint16_t Xend, uint16_t Yend) {
-    EPD_SendCommand(0x44); // SET_RAM_X_ADDRESS_START_END_POSITION
+    EPD_SendCommand(0x44);
     EPD_SendData((Xstart >> 3) & 0xFF);
     EPD_SendData((Xend >> 3) & 0xFF);
 
-    EPD_SendCommand(0x45); // SET_RAM_Y_ADDRESS_START_END_POSITION
+    EPD_SendCommand(0x45);
     EPD_SendData(Ystart & 0xFF);
     EPD_SendData((Ystart >> 8) & 0xFF);
     EPD_SendData(Yend & 0xFF);
@@ -264,10 +301,10 @@ void CustomLcdDisplay::EPD_SetWindows(uint16_t Xstart, uint16_t Ystart, uint16_t
 }
 
 void CustomLcdDisplay::EPD_SetCursor(uint16_t Xstart, uint16_t Ystart) {
-    EPD_SendCommand(0x4E); // SET_RAM_X_ADDRESS_COUNTER
+    EPD_SendCommand(0x4E);
     EPD_SendData(Xstart & 0xFF);
 
-    EPD_SendCommand(0x4F); // SET_RAM_Y_ADDRESS_COUNTER
+    EPD_SendCommand(0x4F);
     EPD_SendData(Ystart & 0xFF);
     EPD_SendData((Ystart >> 8) & 0xFF);
 }
@@ -315,26 +352,26 @@ void CustomLcdDisplay::EPD_Init() {
     vTaskDelay(pdMS_TO_TICKS(50));
 
     read_busy();
-    EPD_SendCommand(0x12); // SWRESET
+    EPD_SendCommand(0x12);
     read_busy();
 
-    EPD_SendCommand(0x01); // Driver output control
+    EPD_SendCommand(0x01);
     EPD_SendData(0xC7);
     EPD_SendData(0x00);
     EPD_SendData(0x01);
 
-    EPD_SendCommand(0x11); // data entry mode
+    EPD_SendCommand(0x11);
     EPD_SendData(0x01);
 
     EPD_SetWindows(0, Width - 1, Height - 1, 0);
 
-    EPD_SendCommand(0x3C); // BorderWavefrom
+    EPD_SendCommand(0x3C);
     EPD_SendData(0x01);
 
     EPD_SendCommand(0x18);
     EPD_SendData(0x80);
 
-    EPD_SendCommand(0x22); // Load Temperature and waveform setting.
+    EPD_SendCommand(0x22);
     EPD_SendData(0XB1);
     EPD_SendCommand(0x20);
 
@@ -342,6 +379,12 @@ void CustomLcdDisplay::EPD_Init() {
     read_busy();
 
     EPD_SetLut(WF_Full_1IN54);
+}
+
+void CustomLcdDisplay::EPD_Sleep() {
+    EPD_SendCommand(0x10);
+    EPD_SendData(0x01);
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 void CustomLcdDisplay::EPD_Clear() {
@@ -352,15 +395,22 @@ void CustomLcdDisplay::EPD_Clear() {
 void CustomLcdDisplay::EPD_Display() {
     int buffer_len = lcd_spi_data.buffer_len;
     EPD_SendCommand(0x24);
-    assert(buffer);
+    if (buffer == nullptr) {
+        ESP_LOGE(TAG, "EPD_Display: buffer is null");
+        return;
+    }
     writeBytes(buffer, buffer_len);
     EPD_TurnOnDisplay();
+    EPD_Sleep();
 }
 
 void CustomLcdDisplay::EPD_DisplayPartBaseImage() {
     int buffer_len = lcd_spi_data.buffer_len;
     EPD_SendCommand(0x24);
-    assert(buffer);
+    if (buffer == nullptr) {
+        ESP_LOGE(TAG, "EPD_DisplayPartBaseImage: buffer is null");
+        return;
+    }
     writeBytes(buffer, buffer_len);
     EPD_SendCommand(0x26);
     writeBytes(buffer, buffer_len);
@@ -391,7 +441,7 @@ void CustomLcdDisplay::EPD_Init_Partial() {
     EPD_SendData(0x00);
     EPD_SendData(0x00);
 
-    EPD_SendCommand(0x3C); // BorderWavefrom
+    EPD_SendCommand(0x3C);
     EPD_SendData(0x80);
 
     EPD_SendCommand(0x22);
@@ -402,7 +452,10 @@ void CustomLcdDisplay::EPD_Init_Partial() {
 
 void CustomLcdDisplay::EPD_DisplayPart() {
     EPD_SendCommand(0x24);
-    assert(buffer);
+    if (buffer == nullptr) {
+        ESP_LOGE(TAG, "EPD_DisplayPart: buffer is null");
+        return;
+    }
     writeBytes(buffer, lcd_spi_data.buffer_len);
     EPD_TurnOnDisplayPart();
 }
@@ -471,7 +524,6 @@ void CustomLcdDisplay::fetch_weather() {
         return;
     }
 
-    // Use the simple text format — response is under 100 bytes, avoids 8KB buffer deadlock
     std::string response;
     char read_buf[128];
     int n;
@@ -480,13 +532,11 @@ void CustomLcdDisplay::fetch_weather() {
     }
     http->Close();
 
-    // wttr.in format: "%t\n%h\n%C"
     std::string text_buf = response;
     if (!text_buf.empty() && text_buf.back() == '\n') {
         text_buf.pop_back();
     }
 
-    // Parse by newline: line 0 = temp, line 1 = humidity, line 2 = condition
     std::string temp_str, hum_str, cond_str;
     size_t pos1 = text_buf.find('\n');
     if (pos1 != std::string::npos) {
@@ -502,7 +552,6 @@ void CustomLcdDisplay::fetch_weather() {
         temp_str = text_buf;
     }
 
-    // Combine temp and humidity on one line
     std::string line1 = temp_str;
     if (!hum_str.empty()) {
         line1 += "  " + hum_str;
@@ -530,7 +579,6 @@ void CustomLcdDisplay::SetupUI() {
 
     lvgl_port_lock(0);
 
-    // Scale emoji box 2x from its center for larger emoji on e-paper
     if (emoji_box_ != nullptr) {
         lv_obj_set_style_transform_pivot_x(emoji_box_, LV_PCT(50), 0);
         lv_obj_set_style_transform_pivot_y(emoji_box_, LV_PCT(50), 0);
@@ -539,7 +587,6 @@ void CustomLcdDisplay::SetupUI() {
 
     auto screen = lv_screen_active();
 
-    // Hide emoji box initially — clock is shown during idle instead
     if (emoji_box_ != nullptr) {
         lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
     }
@@ -603,7 +650,6 @@ void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
     if (state == kDeviceStateIdle) {
         {
             DisplayLockGuard lock(this);
-            // Hide emoji, show clock
             if (emoji_box_ != nullptr && !lv_obj_has_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN)) {
                 lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
             }
@@ -618,7 +664,6 @@ void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
             char date_str[32];
             strftime(date_str, sizeof(date_str), "%a %d %b", &tm);
 
-            // Only update labels when content changes to avoid unnecessary ePaper refreshes
             if (prev_clock_str_ == time_str && prev_date_str_ == date_str
 #ifdef CONFIG_WEATHER_ENABLE
                 && (!weather_valid_ || !weather_dirty_)
@@ -651,7 +696,6 @@ void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
     } else {
         {
             DisplayLockGuard lock(this);
-            // Show emoji, hide clock
             if (emoji_box_ != nullptr && lv_obj_has_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN)) {
                 lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
             }

@@ -26,20 +26,22 @@ typedef struct {
 
 class CustomLcdDisplay : public LcdDisplay {
 public:
+    static constexpr int BUSY_TIMEOUT_MS = 5000;
+
     CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                   int width, int height, int offset_x, int offset_y,
                   bool mirror_x, bool mirror_y, bool swap_xy,custom_lcd_spi_t _lcd_spi_data);
     ~CustomLcdDisplay();
 
-    void EPD_Init();    /* 墨水屏初始化 */
-    void EPD_Clear();   /* 清空屏幕 */
-    void EPD_Display(); /* 刷buffer到墨水屏 */
+    void EPD_Init();
+    void EPD_Clear();
+    void EPD_Display();
     
-    /*快速刷新*/
     void EPD_DisplayPartBaseImage();
     void EPD_Init_Partial();
     void EPD_DisplayPart();
-    void EPD_DrawColorPixel(uint16_t x, uint16_t y,uint8_t color);
+    void EPD_DrawColorPixel(uint16_t x, uint16_t y, uint8_t color);
+    void EPD_Sleep();
     
 private:
     const custom_lcd_spi_t lcd_spi_data;
@@ -47,6 +49,7 @@ private:
     const int Height;
     spi_device_handle_t spi;
     uint8_t *buffer = nullptr;
+    int partial_refresh_count_ = 0;
     lv_obj_t *clock_label_ = nullptr;
     lv_obj_t *date_label_ = nullptr;
     std::string prev_clock_str_;
