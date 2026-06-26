@@ -82,7 +82,7 @@ void CustomLcdDisplay::lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, 
         }
     }
     driver->EPD_DisplayPart();
-    lv_disp_flush_ready(disp);
+    lv_display_flush_ready(disp);
 }
 
 CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, 
@@ -134,7 +134,18 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
-    
+#ifdef CONFIG_WEATHER_ENABLE
+    if (weather_timer_ != nullptr) {
+        esp_timer_stop(weather_timer_);
+        esp_timer_delete(weather_timer_);
+        weather_timer_ = nullptr;
+    }
+    if (weather_init_timer_ != nullptr) {
+        esp_timer_stop(weather_init_timer_);
+        esp_timer_delete(weather_init_timer_);
+        weather_init_timer_ = nullptr;
+    }
+#endif
 }
 
 void CustomLcdDisplay::spi_gpio_init() {
@@ -498,6 +509,11 @@ void CustomLcdDisplay::fetch_weather() {
     }
 
     ESP_LOGI(TAG, "Weather: %s | %s", line1.c_str(), cond_str.c_str());
+
+    if (line1.empty()) {
+        ESP_LOGW(TAG, "Weather: empty data, skipping update");
+        return;
+    }
 
     {
         DisplayLockGuard lock(this);

@@ -9,7 +9,11 @@
 #else
 #define WEATHER_URL "http://wttr.in/Moscow?format=%C+%t"
 #endif
-#define UPDATE_INTERVAL_US (30 * 60 * 1000000ULL)
+#ifdef CONFIG_WEATHER_UPDATE_INTERVAL
+#define WEATHER_UPDATE_INTERVAL_US (CONFIG_WEATHER_UPDATE_INTERVAL * 60 * 1000000ULL)
+#else
+#define WEATHER_UPDATE_INTERVAL_US (30 * 60 * 1000000ULL)
+#endif
 
 const char* WeatherManager::WeatherCodeToString(int code) {
     if (code == 0) return "Clear";
@@ -49,7 +53,7 @@ void WeatherManager::Initialize() {
         if (self->timer_ != nullptr) {
             if (self->weather_data_.valid) {
                 esp_timer_stop(self->timer_);
-                esp_timer_start_periodic(self->timer_, UPDATE_INTERVAL_US);
+                esp_timer_start_periodic(self->timer_, WEATHER_UPDATE_INTERVAL_US);
             } else {
                 esp_timer_stop(self->timer_);
                 esp_timer_start_once(self->timer_, 30 * 1000000ULL);
