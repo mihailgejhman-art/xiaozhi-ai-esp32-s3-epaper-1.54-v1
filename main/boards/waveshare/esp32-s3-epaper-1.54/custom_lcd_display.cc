@@ -19,6 +19,10 @@ LV_FONT_DECLARE(lv_font_montserrat_48);
 #define BYTES_PER_PIXEL (LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565))
 #define BUFF_SIZE (EXAMPLE_LCD_WIDTH * EXAMPLE_LCD_HEIGHT * BYTES_PER_PIXEL)
 
+// LVGL transform_scale values (base 256 = 1.0x)
+static constexpr int EMOJI_SCALE = 512;   // 512/256 = 2.0x
+static constexpr int CLOCK_SCALE = 346;   // 346/256 ≈ 1.35x
+
 const uint8_t WF_Full_1IN54[159] =
 {											
     0x80,0x48,0x40,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
@@ -409,31 +413,28 @@ void CustomLcdDisplay::EPD_DrawColorPixel(uint16_t x, uint16_t y, uint8_t color)
 
 #ifdef CONFIG_WEATHER_ENABLE
 void CustomLcdDisplay::UpdateWeather() {
-    if (weather_fetching_) return;
-    weather_fetching_ = true;
+    if (weather_fetching_.exchange(true)) return;
     xTaskCreate([](void* p) {
         auto* self = static_cast<CustomLcdDisplay*>(p);
         self->fetch_weather();
         self->weather_fetching_ = false;
-        vTaskDelete(NULL);
-    }, "weather_fetch", 8192, this, 5, NULL);
+        vTaskDelete(nullptr);
+    }, "weather_fetch", 8192, this, 5, nullptr);
 }
 
 void CustomLcdDisplay::weather_timer_cb(void* arg) {
     auto* self = static_cast<CustomLcdDisplay*>(arg);
-    // Delete one-shot init timer after first fire to prevent handle leak
     if (self->weather_init_timer_ != nullptr) {
         esp_timer_delete(self->weather_init_timer_);
         self->weather_init_timer_ = nullptr;
     }
-    if (self->weather_fetching_) return;
-    self->weather_fetching_ = true;
+    if (self->weather_fetching_.exchange(true)) return;
     xTaskCreate([](void* p) {
         auto* task_self = static_cast<CustomLcdDisplay*>(p);
         task_self->fetch_weather();
         task_self->weather_fetching_ = false;
-        vTaskDelete(NULL);
-    }, "weather_fetch", 8192, self, 5, NULL);
+        vTaskDelete(nullptr);
+    }, "weather_fetch", 8192, self, 5, nullptr);
 }
 
 void CustomLcdDisplay::fetch_weather() {
@@ -517,7 +518,7 @@ void CustomLcdDisplay::SetupUI() {
     if (emoji_box_ != nullptr) {
         lv_obj_set_style_transform_pivot_x(emoji_box_, LV_PCT(50), 0);
         lv_obj_set_style_transform_pivot_y(emoji_box_, LV_PCT(50), 0);
-        lv_obj_set_style_transform_scale(emoji_box_, 512, 0);
+        lv_obj_set_style_transform_scale(emoji_box_, EMOJI_SCALE, 0);
     }
 
     auto screen = lv_screen_active();
@@ -533,7 +534,7 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_align(clock_label_, LV_ALIGN_CENTER, 0, -30);
     lv_obj_set_style_transform_pivot_x(clock_label_, LV_PCT(50), 0);
     lv_obj_set_style_transform_pivot_y(clock_label_, LV_PCT(50), 0);
-    lv_obj_set_style_transform_scale(clock_label_, 346, 0);
+    lv_obj_set_style_transform_scale(clock_label_, CLOCK_SCALE, 0);
     lv_obj_add_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);
 
     date_label_ = lv_label_create(screen);
@@ -604,7 +605,7 @@ void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
             // Only update labels when content changes to avoid unnecessary ePaper refreshes
             if (prev_clock_str_ == time_str && prev_date_str_ == date_str
 #ifdef CONFIG_WEATHER_ENABLE
-                && (weather_valid_ && !weather_dirty_)
+                && (!weather_valid_ || !weather_dirty_)
 #endif
                 ) {
                 return;

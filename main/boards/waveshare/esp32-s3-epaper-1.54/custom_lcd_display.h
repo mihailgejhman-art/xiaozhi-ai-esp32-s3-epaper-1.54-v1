@@ -1,5 +1,5 @@
-#ifndef __CUSTOM_LCD_DISPLAY_H__
-#define __CUSTOM_LCD_DISPLAY_H__
+#ifndef CUSTOM_LCD_DISPLAY_H_
+#define CUSTOM_LCD_DISPLAY_H_
 
 #include <atomic>
 #include <driver/gpio.h>
@@ -46,7 +46,7 @@ private:
     const int Width;
     const int Height;
     spi_device_handle_t spi;
-    uint8_t *buffer = NULL;
+    uint8_t *buffer = nullptr;
     lv_obj_t *clock_label_ = nullptr;
     lv_obj_t *date_label_ = nullptr;
     std::string prev_clock_str_;
@@ -56,8 +56,8 @@ private:
     lv_obj_t *weather_cond_label_ = nullptr;
     std::string weather_text_;
     std::string weather_cond_text_;
-    bool weather_valid_ = false;
-    bool weather_dirty_ = false;
+    std::atomic<bool> weather_valid_{false};
+    std::atomic<bool> weather_dirty_{false};
     esp_timer_handle_t weather_timer_ = nullptr;
     esp_timer_handle_t weather_init_timer_ = nullptr;
 
@@ -78,12 +78,12 @@ public:
     void spi_port_init();
     void read_busy();
 
-    void set_cs_1(){gpio_set_level((gpio_num_t)lcd_spi_data.cs,1);}
-    void set_cs_0(){gpio_set_level((gpio_num_t)lcd_spi_data.cs,0);}
-    void set_dc_1(){gpio_set_level((gpio_num_t)lcd_spi_data.dc,1);}
-    void set_dc_0(){gpio_set_level((gpio_num_t)lcd_spi_data.dc,0);}
-    void set_rst_1(){gpio_set_level((gpio_num_t)lcd_spi_data.rst,1);}
-    void set_rst_0(){gpio_set_level((gpio_num_t)lcd_spi_data.rst,0);}
+    void set_cs_1(){gpio_set_level(static_cast<gpio_num_t>(lcd_spi_data.cs),1);}
+    void set_cs_0(){gpio_set_level(static_cast<gpio_num_t>(lcd_spi_data.cs),0);}
+    void set_dc_1(){gpio_set_level(static_cast<gpio_num_t>(lcd_spi_data.dc),1);}
+    void set_dc_0(){gpio_set_level(static_cast<gpio_num_t>(lcd_spi_data.dc),0);}
+    void set_rst_1(){gpio_set_level(static_cast<gpio_num_t>(lcd_spi_data.rst),1);}
+    void set_rst_0(){gpio_set_level(static_cast<gpio_num_t>(lcd_spi_data.rst),0);}
 
     void SPI_SendByte(uint8_t data);
     void EPD_SendData(uint8_t data);
@@ -97,4 +97,4 @@ public:
     void EPD_TurnOnDisplayPart();
 };
 
-#endif // __CUSTOM_LCD_DISPLAY_H__
+#endif // CUSTOM_LCD_DISPLAY_H_

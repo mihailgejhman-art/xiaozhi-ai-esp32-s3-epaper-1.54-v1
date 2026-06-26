@@ -92,8 +92,6 @@ void WeatherManager::FetchTask(void* arg) {
 }
 
 void WeatherManager::DoFetch() {
-    busy_ = true;
-
     esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (netif == nullptr || !esp_netif_is_netif_up(netif)) {
         ESP_LOGW(TAG, "Network not available, skipping weather fetch");
